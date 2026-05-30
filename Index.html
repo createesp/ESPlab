@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32 Verkehrssteuerung</title>
+<style>
+  body {
+    font-family: sans-serif;
+    text-align: center;
+    padding: 20px;
+    background: #222;
+    color: #eee;
+    margin: 0;
+  }
+  h1 { font-size: 1.5em; }
+  button {
+    font-size: 1.6em;
+    padding: 25px 50px;
+    margin: 10px;
+    border-radius: 12px;
+    border: none;
+    color: white;
+    cursor: pointer;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    transition: transform 0.1s;
+    min-width: 220px;
+  }
+  button:active { transform: scale(0.95); }
+  .green   { background: #28a745; }
+  .red     { background: #dc3545; }
+  .off     { background: #555; }
+  .connect { background: #0d6efd; }
+  .forget  { background: #888; font-size: 0.9em; padding: 10px 20px; }
+  #status {
+    font-weight: bold;
+    padding: 12px;
+    margin: 10px;
+    border-radius: 8px;
+    background: #333;
+  }
+  #log {
+    white-space: pre;
+    text-align: left;
+    font-family: monospace;
+    background: #111;
+    padding: 10px;
+    border-radius: 8px;
+    margin-top: 20px;
+    max-height: 250px;
+    overflow-y: auto;
+    font-size: 0.85em;
+    line-height: 1.4;
+  }
+</style>
+</head>
+<body>
+
+<h1>🚦 Verkehrssteuerung</h1>
+<div id="status">⏳ Wird geladen...</div>
+
+<button id="connect" class="connect">🔌 Mit ESP32 verbinden</button>
+<button id="forget" class="forget">🗑️ Verbindung vergessen</button>
+
+<div id="buttons" style="display:none"></div>
+<div id="log"></div>
+
+<script>
+// ============================================
+// BUTTONS
+// ============================================
+const BUTTONS = [
+  { label: "🚛 Anliefern",            cmd: "A1", cls: "green" },
+  { label: "🛑 Anlieferung Stopp",   cmd: "A0", cls: "red"   },
+  { label: "⚫ Lampen aus",           cmd: "XX", cls: "off"   }
+];
+
+// ============================================
+
+let port    = null;
+let writer  = null;
+let reading = false;
+
+const status   = document.getElementById('status');
+const logEl    = document.getElementById('log');
+const btnArea  = document.getElementById('buttons');
+const btnConn  = document.getElementById('connect');
+const btnForget= document.getElementById('forget');
+
+function log(m) {
+  const time = new Date().toLocaleTimeString();
+  logEl.textContent = `[${time}] ${m}\n` + logEl.textContent;
+}
+
+function setStatus(text, color) {
+  status.textContent = text;
+  status.style.color = color || "#eee";
+}
+
+async function connect(p) {
+  try {
+    port = p;
+    await port.open({ baudRate: 115200 });
+    writer = port.writable.getWriter();
+    setStatus("✅ Verbunden mit ESP32", "#28a745");
+    btnConn.style.display = "none";
+    btnArea.style.display = "block";
+    log("✓ Verbunden!");
+    readLoop();
+  } catch(e) {
+    log("❌ Fehler: " + e.message);
+    setStatus("❌ Verbindungsfehler — bitte erneut versuchen", "#dc3545");
+    btnConn.style.display = "inline-block";
+  }
+}
+
+window.addEventListener('load', async () => {
+  if (!('serial' in navigator)) {
+    setStatus("❌ Browser unterstützt kein Web Serial (nur Chrome/Edge)", "#dc3545");
+    btnConn.style.display = "none";
+    btnForget.style.display = "none";
+    return;
+  }
+  const ports = await navigator.serial.getPorts();
+  if (ports.length > 0) {
+    log("🔄 Vorher freigegebener Port gefunden, verbinde automatisch...");
+    setStatus("🔄 Verbinde automatisch...", "#0d6efd");
+    await connect(ports[0]);
+  } else {
+    setStatus("ℹ️ Bitte einmalig auf 'Verbinden' klicken", "#ffc107");
+    log("Erste Verwendung — bitte Verbinden klicken.");
+  }
+});
+
+btnConn.onclick = async () => {
+  try {
+    const p = await navigator.serial.requestPort();
+    await connect(p);
+  } catch(e) {
+    log("Abgebrochen oder Fehler: " + e.message);
+  }
+};
+
+btnForget.onclick = async () => {
+  try {
+    if (writer) { try { writer.releaseLock(); } catch(e) {} writer = null; }
+    if (port) {
+      try { await port.close(); } catch(e) {}
+      try { await port.forget(); } catch(e) {}
+      port = null;
+    }
+    const ports = await navigator.serial.getPorts();
+    for (const p of ports) {
+      try { await p.forget(); } catch(e) {}
+    }
+    log("🗑️ Berechtigung entfernt. Seite wird neu geladen...");
+    setTimeout(() => location.reload(), 800);
+  } catch(e) {
+    log("Fehler beim Vergessen: " + e.message);
+  }
+};
+
+async function readLoop() {
+  if (reading) return;
+  reading = true;
+  const reader = port.readable.getReader();
+  const dec = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nl).replace(/\r$/, "").trim();
+        buffer = buffer.slice(nl + 1);
+        if (line) log("← " + line);
+      }
+    }
+  } catch(e) {
+    log("Lesefehler: " + e.message);
+    setStatus("⚠️ Verbindung unterbrochen", "#ffc107");
+  } finally {
+    try { reader.releaseLock(); } catch(e) {}
+    reading = false;
+  }
+}
+
+async function send(cmd) {
+  if (!writer) { log("❌ Erst verbinden!"); return; }
+  try {
+    await writer.write(new TextEncoder().encode(cmd + "\n"));
+    log("→ " + cmd);
+  } catch(e) {
+    log("Sendefehler: " + e.message);
+    setStatus("⚠️ Verbindung verloren", "#ffc107");
+  }
+}
+
+BUTTONS.forEach(b => {
+  const el = document.createElement('button');
+  el.textContent = b.label;
+  el.className = b.cls;
+  el.onclick = () => send(b.cmd);
+  btnArea.appendChild(el);
+});
+</script>
+
+</body>
+</html>
+
+
