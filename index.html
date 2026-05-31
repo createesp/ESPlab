@@ -28,13 +28,13 @@
     opacity: 0.6;
   }
   button:active { transform: scale(0.95); }
+  button:disabled { cursor: not-allowed; opacity: 0.35 !important; }
   .green   { background: #28a745; }
   .red     { background: #dc3545; }
   .off     { background: #555; }
   .connect { background: #0d6efd; opacity: 1; }
   .forget  { background: #888; font-size: 0.9em; padding: 10px 20px; opacity: 1; }
 
-  /* Aktiver Button: deutlich hervorgehoben */
   #buttons button.active {
     opacity: 1;
     border: 3px solid #ffc107;
@@ -49,6 +49,66 @@
     border-radius: 8px;
     background: #333;
   }
+
+  #schedule {
+    display: none;
+    max-width: 420px;
+    margin: 16px auto;
+    padding: 16px;
+    background: #2a2a2a;
+    border-radius: 10px;
+    text-align: left;
+    font-size: 0.95em;
+  }
+  #schedule h2 {
+    margin: 0 0 12px;
+    font-size: 1.1em;
+    text-align: center;
+  }
+  #schedule label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  #schedule .times {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 8px;
+  }
+  #schedule .times label {
+    flex-direction: column;
+    align-items: center;
+    margin: 0;
+  }
+  #schedule input[type="time"],
+  #schedule select {
+    background: #111;
+    color: #eee;
+    border: 1px solid #555;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 1em;
+  }
+  #schedule .section {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid #444;
+  }
+  #schedule .section:first-of-type {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+  }
+  #scheduleHint, #nightHint {
+    margin-top: 10px;
+    text-align: center;
+    color: #adb5bd;
+    font-size: 0.85em;
+  }
+
   #log {
     white-space: pre;
     text-align: left;
@@ -72,30 +132,79 @@
 <button id="connect" class="connect">🔌 Mit ESP32 verbinden</button>
 <button id="forget" class="forget">🗑️ Verbindung vergessen</button>
 
+<div id="schedule">
+  <h2>⏰ Zeitschaltung</h2>
+
+  <div class="section">
+    <label>
+      <input type="checkbox" id="nightEnabled">
+      Nacht-Ausschaltung aktiv
+    </label>
+    <div class="times">
+      <label>
+        Aus ab
+        <input type="time" id="nightStart" value="20:00">
+      </label>
+      <label>
+        Morgens ab (Mo–Fr)
+        <input type="time" id="nightEnd" value="05:00">
+      </label>
+    </div>
+    <label>
+      Morgens automatisch
+      <select id="morningMode">
+        <option value="A1">🟢 Grün (Anliefern)</option>
+        <option value="A0">🔴 Rot (Stopp)</option>
+      </select>
+    </label>
+    <div id="nightHint">Nachts: Lampen aus. Werktags morgens automatisch Grün oder Rot.</div>
+  </div>
+
+  <div class="section">
+    <label>
+      <input type="checkbox" id="blockWeekends" checked>
+      Wochenende (Sa/So): Lampe gesperrt
+    </label>
+    <div id="scheduleHint">Am Samstag und Sonntag bleibt die Lampe aus — kein Einschalten.</div>
+  </div>
+</div>
+
 <div id="buttons" style="display:none"></div>
 <div id="log"></div>
 
 <script>
-// ============================================
-// BUTTONS
-// ============================================
 const BUTTONS = [
-  { label: "🚛 Anliefern",          cmd: "A1", cls: "green" },
-  { label: "🛑 Anlieferung Stopp",  cmd: "A0", cls: "red"   },
-  { label: "⚫ Lampen aus",         cmd: "XX", cls: "off"   }
+  { label: "🚛 Anliefern",          cmd: "A1", cls: "green", blockAtNight: true  },
+  { label: "🛑 Anlieferung Stopp",  cmd: "A0", cls: "red",   blockAtNight: true  },
+  { label: "⚫ Lampen aus",         cmd: "XX", cls: "off",   blockAtNight: false }
 ];
 
-// ============================================
+const KEEPALIVE_MS = 10000;
+const SCHEDULE_CHECK_MS = 30000;
+const STORAGE_KEY = "esp32_night_schedule";
 
-let port    = null;
-let writer  = null;
+let port = null;
+let writer = null;
 let reading = false;
+let keepaliveTimer = null;
+let scheduleTimer = null;
+let nightModeActive = false;
+let weekendBlockActive = false;
+let wasNightMode = false;
+let wasWeekendBlock = false;
+const buttonEls = [];
 
-const status   = document.getElementById('status');
-const logEl    = document.getElementById('log');
-const btnArea  = document.getElementById('buttons');
-const btnConn  = document.getElementById('connect');
-const btnForget= document.getElementById('forget');
+const status    = document.getElementById('status');
+const logEl     = document.getElementById('log');
+const btnArea   = document.getElementById('buttons');
+const btnConn   = document.getElementById('connect');
+const btnForget = document.getElementById('forget');
+const schedule  = document.getElementById('schedule');
+const nightEnabled = document.getElementById('nightEnabled');
+const nightStart   = document.getElementById('nightStart');
+const nightEnd     = document.getElementById('nightEnd');
+const blockWeekends = document.getElementById('blockWeekends');
+const morningMode   = document.getElementById('morningMode');
 
 function log(m) {
   const time = new Date().toLocaleTimeString();
@@ -112,17 +221,202 @@ function setActiveButton(activeEl) {
   if (activeEl) activeEl.classList.add('active');
 }
 
+function loadScheduleSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    nightEnabled.checked = saved.enabled !== false;
+    blockWeekends.checked = saved.blockWeekends !== false;
+    nightStart.value = saved.start || "20:00";
+    nightEnd.value = saved.end || "05:00";
+    morningMode.value = saved.morningMode === "A0" ? "A0" : "A1";
+  } catch (e) {
+    nightStart.value = "20:00";
+    nightEnd.value = "05:00";
+    blockWeekends.checked = true;
+    morningMode.value = "A1";
+  }
+}
+
+function saveScheduleSettings() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    enabled: nightEnabled.checked,
+    blockWeekends: blockWeekends.checked,
+    start: nightStart.value,
+    end: nightEnd.value,
+    morningMode: morningMode.value
+  }));
+}
+
+function parseTimeHHMM(value) {
+  const [h, m] = value.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function isNightTime(now) {
+  if (!nightEnabled.checked) return false;
+  const mins = now.getHours() * 60 + now.getMinutes();
+  const start = parseTimeHHMM(nightStart.value);
+  const end = parseTimeHHMM(nightEnd.value);
+  if (start === end) return true;
+  if (start < end) return mins >= start && mins < end;
+  return mins >= start || mins < end;
+}
+
+function isWeekendBlock(now) {
+  if (!blockWeekends.checked) return false;
+  const day = now.getDay();
+  return day === 0 || day === 6;
+}
+
+function isControlBlocked() {
+  return nightModeActive || weekendBlockActive;
+}
+
+function greenButtonEl() {
+  return buttonEls.find(b => b.cmd === "A1")?.el || null;
+}
+
+function redButtonEl() {
+  return buttonEls.find(b => b.cmd === "A0")?.el || null;
+}
+
+function offButtonEl() {
+  return buttonEls.find(b => b.cmd === "XX")?.el || null;
+}
+
+function updateScheduleUI() {
+  const now = new Date();
+  nightModeActive = isNightTime(now);
+  weekendBlockActive = isWeekendBlock(now);
+
+  buttonEls.forEach(({ el, blockAtNight }) => {
+    el.disabled = blockAtNight && isControlBlocked();
+  });
+
+  if (nightModeActive) {
+    setStatus("🌙 Nachtmodus — Lampen aus", "#6f42c1");
+  } else if (weekendBlockActive) {
+    setStatus("📅 Wochenende — Lampe gesperrt", "#fd7e14");
+  } else if (writer) {
+    setStatus("✅ Verbunden mit ESP32", "#28a745");
+  }
+}
+
+async function sendRaw(cmd, logSend = true) {
+  if (!writer) return false;
+  try {
+    await writer.write(new TextEncoder().encode(cmd + "\n"));
+    if (logSend) log("→ " + cmd);
+    return true;
+  } catch (e) {
+    log("Sendefehler: " + e.message);
+    setStatus("⚠️ Verbindung verloren", "#ffc107");
+    return false;
+  }
+}
+
+async function send(cmd, buttonEl) {
+  if (!writer) { log("❌ Erst verbinden!"); return; }
+  if (isControlBlocked() && cmd !== "XX") {
+    if (weekendBlockActive) log("📅 Wochenende — Befehl blockiert");
+    else log("🌙 Nachtmodus — Befehl blockiert");
+    return;
+  }
+  const ok = await sendRaw(cmd);
+  if (ok && buttonEl) setActiveButton(buttonEl);
+}
+
+async function applyMorningState() {
+  const cmd = morningMode.value === "A0" ? "A0" : "A1";
+  const label = cmd === "A1" ? "Grün (Anliefern)" : "Rot (Stopp)";
+  log("☀️ Morgen — automatisch " + label);
+  const ok = await sendRaw(cmd);
+  if (ok) setActiveButton(cmd === "A1" ? greenButtonEl() : redButtonEl());
+  return ok;
+}
+
+async function sendKeepalive() {
+  await sendRaw("HB", false);
+}
+
+async function runScheduleCheck() {
+  const now = new Date();
+  const night = isNightTime(now);
+  const weekend = isWeekendBlock(now);
+
+  updateScheduleUI();
+  if (!writer) return;
+
+  if (night) {
+    if (!wasNightMode) {
+      log("🌙 Nachtmodus beginnt — Lampen aus");
+      await sendRaw("XX");
+      setActiveButton(offButtonEl());
+    } else {
+      await sendRaw("XX", false);
+    }
+  } else if (weekend) {
+    if (!wasWeekendBlock) {
+      log("📅 Wochenende — Lampen aus");
+      await sendRaw("XX");
+      setActiveButton(offButtonEl());
+    } else {
+      await sendRaw("XX", false);
+    }
+  } else {
+    if (wasNightMode && !night) {
+      await applyMorningState();
+    }
+  }
+
+  wasNightMode = night;
+  wasWeekendBlock = weekend;
+}
+
+function startBackgroundTasks() {
+  stopBackgroundTasks();
+  const now = new Date();
+  wasNightMode = isNightTime(now);
+  wasWeekendBlock = isWeekendBlock(now);
+  sendKeepalive();
+  runScheduleCheck();
+  keepaliveTimer = setInterval(sendKeepalive, KEEPALIVE_MS);
+  scheduleTimer = setInterval(runScheduleCheck, SCHEDULE_CHECK_MS);
+}
+
+function stopBackgroundTasks() {
+  if (keepaliveTimer) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+  if (scheduleTimer) { clearInterval(scheduleTimer); scheduleTimer = null; }
+  wasNightMode = false;
+  wasWeekendBlock = false;
+  nightModeActive = false;
+  weekendBlockActive = false;
+}
+
+async function applyInitialDayState() {
+  const now = new Date();
+  if (isNightTime(now) || isWeekendBlock(now)) {
+    await sendRaw("XX");
+    setActiveButton(offButtonEl());
+  } else {
+    await applyMorningState();
+  }
+}
+
 async function connect(p) {
   try {
     port = p;
     await port.open({ baudRate: 115200 });
     writer = port.writable.getWriter();
-    setStatus("✅ Verbunden mit ESP32", "#28a745");
     btnConn.style.display = "none";
     btnArea.style.display = "block";
+    schedule.style.display = "block";
     log("✓ Verbunden!");
+    updateScheduleUI();
     readLoop();
-  } catch(e) {
+    await applyInitialDayState();
+    startBackgroundTasks();
+  } catch (e) {
     log("❌ Fehler: " + e.message);
     setStatus("❌ Verbindungsfehler — bitte erneut versuchen", "#dc3545");
     btnConn.style.display = "inline-block";
@@ -130,12 +424,24 @@ async function connect(p) {
 }
 
 window.addEventListener('load', async () => {
+  loadScheduleSettings();
+
+  [nightEnabled, nightStart, nightEnd, blockWeekends, morningMode].forEach(el => {
+    el.addEventListener("change", () => {
+      saveScheduleSettings();
+      if (!writer) return;
+      if (el === morningMode && !isControlBlocked()) applyMorningState();
+      else runScheduleCheck();
+    });
+  });
+
   if (!('serial' in navigator)) {
     setStatus("❌ Browser unterstützt kein Web Serial (nur Chrome/Edge)", "#dc3545");
     btnConn.style.display = "none";
     btnForget.style.display = "none";
     return;
   }
+
   const ports = await navigator.serial.getPorts();
   if (ports.length > 0) {
     log("🔄 Vorher freigegebener Port gefunden, verbinde automatisch...");
@@ -151,26 +457,25 @@ btnConn.onclick = async () => {
   try {
     const p = await navigator.serial.requestPort();
     await connect(p);
-  } catch(e) {
+  } catch (e) {
     log("Abgebrochen oder Fehler: " + e.message);
   }
 };
 
 btnForget.onclick = async () => {
   try {
-    if (writer) { try { writer.releaseLock(); } catch(e) {} writer = null; }
+    stopBackgroundTasks();
+    if (writer) { try { writer.releaseLock(); } catch (e) {} writer = null; }
     if (port) {
-      try { await port.close(); } catch(e) {}
-      try { await port.forget(); } catch(e) {}
+      try { await port.close(); } catch (e) {}
+      try { await port.forget(); } catch (e) {}
       port = null;
     }
     const ports = await navigator.serial.getPorts();
-    for (const p of ports) {
-      try { await p.forget(); } catch(e) {}
-    }
+    for (const p of ports) { try { await p.forget(); } catch (e) {} }
     log("🗑️ Berechtigung entfernt. Seite wird neu geladen...");
     setTimeout(() => location.reload(), 800);
-  } catch(e) {
+  } catch (e) {
     log("Fehler beim Vergessen: " + e.message);
   }
 };
@@ -193,24 +498,13 @@ async function readLoop() {
         if (line) log("← " + line);
       }
     }
-  } catch(e) {
+  } catch (e) {
     log("Lesefehler: " + e.message);
     setStatus("⚠️ Verbindung unterbrochen", "#ffc107");
+    stopBackgroundTasks();
   } finally {
-    try { reader.releaseLock(); } catch(e) {}
+    try { reader.releaseLock(); } catch (e) {}
     reading = false;
-  }
-}
-
-async function send(cmd, buttonEl) {
-  if (!writer) { log("❌ Erst verbinden!"); return; }
-  try {
-    await writer.write(new TextEncoder().encode(cmd + "\n"));
-    log("→ " + cmd);
-    setActiveButton(buttonEl);
-  } catch(e) {
-    log("Sendefehler: " + e.message);
-    setStatus("⚠️ Verbindung verloren", "#ffc107");
   }
 }
 
@@ -220,6 +514,7 @@ BUTTONS.forEach(b => {
   el.className = b.cls;
   el.onclick = () => send(b.cmd, el);
   btnArea.appendChild(el);
+  buttonEls.push({ el, cmd: b.cmd, blockAtNight: b.blockAtNight });
 });
 </script>
 
