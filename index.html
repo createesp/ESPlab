@@ -19,19 +19,29 @@
     padding: 25px 50px;
     margin: 10px;
     border-radius: 12px;
-    border: none;
+    border: 3px solid transparent;
     color: white;
     cursor: pointer;
     box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-    transition: transform 0.1s;
+    transition: transform 0.1s, border 0.2s, box-shadow 0.2s, opacity 0.2s;
     min-width: 220px;
+    opacity: 0.6;
   }
   button:active { transform: scale(0.95); }
   .green   { background: #28a745; }
   .red     { background: #dc3545; }
   .off     { background: #555; }
-  .connect { background: #0d6efd; }
-  .forget  { background: #888; font-size: 0.9em; padding: 10px 20px; }
+  .connect { background: #0d6efd; opacity: 1; }
+  .forget  { background: #888; font-size: 0.9em; padding: 10px 20px; opacity: 1; }
+
+  /* Aktiver Button: deutlich hervorgehoben */
+  #buttons button.active {
+    opacity: 1;
+    border: 3px solid #ffc107;
+    box-shadow: 0 0 20px #ffc107, 0 4px 6px rgba(0,0,0,0.3);
+    transform: scale(1.05);
+  }
+
   #status {
     font-weight: bold;
     padding: 12px;
@@ -70,9 +80,9 @@
 // BUTTONS
 // ============================================
 const BUTTONS = [
-  { label: "🚛 Anliefern",            cmd: "A1", cls: "green" },
-  { label: "🛑 Anlieferung Stopp",   cmd: "A0", cls: "red"   },
-  { label: "⚫ Lampen aus",           cmd: "XX", cls: "off"   }
+  { label: "🚛 Anliefern",          cmd: "A1", cls: "green" },
+  { label: "🛑 Anlieferung Stopp",  cmd: "A0", cls: "red"   },
+  { label: "⚫ Lampen aus",         cmd: "XX", cls: "off"   }
 ];
 
 // ============================================
@@ -95,6 +105,11 @@ function log(m) {
 function setStatus(text, color) {
   status.textContent = text;
   status.style.color = color || "#eee";
+}
+
+function setActiveButton(activeEl) {
+  document.querySelectorAll('#buttons button').forEach(btn => btn.classList.remove('active'));
+  if (activeEl) activeEl.classList.add('active');
 }
 
 async function connect(p) {
@@ -187,11 +202,12 @@ async function readLoop() {
   }
 }
 
-async function send(cmd) {
+async function send(cmd, buttonEl) {
   if (!writer) { log("❌ Erst verbinden!"); return; }
   try {
     await writer.write(new TextEncoder().encode(cmd + "\n"));
     log("→ " + cmd);
+    setActiveButton(buttonEl);
   } catch(e) {
     log("Sendefehler: " + e.message);
     setStatus("⚠️ Verbindung verloren", "#ffc107");
@@ -202,12 +218,10 @@ BUTTONS.forEach(b => {
   const el = document.createElement('button');
   el.textContent = b.label;
   el.className = b.cls;
-  el.onclick = () => send(b.cmd);
+  el.onclick = () => send(b.cmd, el);
   btnArea.appendChild(el);
 });
 </script>
 
 </body>
 </html>
-
-
