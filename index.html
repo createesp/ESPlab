@@ -50,6 +50,55 @@
     background: #333;
   }
 
+  #linkStatus {
+    display: none;
+    max-width: 420px;
+    margin: 12px auto;
+    padding: 14px 16px;
+    background: #2a2a2a;
+    border-radius: 10px;
+    text-align: left;
+  }
+  #linkStatus h2 {
+    margin: 0 0 10px;
+    font-size: 1em;
+    text-align: center;
+  }
+  #linkBars {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 5px;
+    height: 36px;
+    margin: 10px 0;
+  }
+  #linkBars span {
+    width: 14px;
+    border-radius: 3px 3px 0 0;
+    background: #444;
+    transition: background 0.3s, height 0.3s;
+  }
+  #linkBars span:nth-child(1) { height: 8px; }
+  #linkBars span:nth-child(2) { height: 14px; }
+  #linkBars span:nth-child(3) { height: 20px; }
+  #linkBars span:nth-child(4) { height: 26px; }
+  #linkBars span:nth-child(5) { height: 32px; }
+  #linkBars span.on { background: #28a745; }
+  #linkBars span.on.warn { background: #ffc107; }
+  #linkBars span.on.bad  { background: #dc3545; }
+  #linkText {
+    text-align: center;
+    font-size: 0.95em;
+    color: #adb5bd;
+  }
+  #linkRssi {
+    text-align: center;
+    font-family: monospace;
+    font-size: 1.1em;
+    margin-top: 4px;
+    color: #eee;
+  }
+
   #schedule {
     display: none;
     max-width: 420px;
@@ -129,6 +178,15 @@
 <h1>🚦 Verkehrssteuerung</h1>
 <div id="status">⏳ Wird geladen...</div>
 
+<div id="linkStatus">
+  <h2>📡 Empfänger-Signal</h2>
+  <div id="linkBars" aria-hidden="true">
+    <span></span><span></span><span></span><span></span><span></span>
+  </div>
+  <div id="linkRssi">— dBm</div>
+  <div id="linkText">Warte auf Messung…</div>
+</div>
+
 <button id="connect" class="connect">🔌 Mit ESP32 verbinden</button>
 <button id="forget" class="forget">🗑️ Verbindung vergessen</button>
 
@@ -194,8 +252,12 @@ let wasNightMode = false;
 let wasWeekendBlock = false;
 const buttonEls = [];
 
-const status    = document.getElementById('status');
-const logEl     = document.getElementById('log');
+const status     = document.getElementById('status');
+const linkStatus = document.getElementById('linkStatus');
+const linkBars   = document.querySelectorAll('#linkBars span');
+const linkText   = document.getElementById('linkText');
+const linkRssi   = document.getElementById('linkRssi');
+const logEl      = document.getElementById('log');
 const btnArea   = document.getElementById('buttons');
 const btnConn   = document.getElementById('connect');
 const btnForget = document.getElementById('forget');
@@ -214,6 +276,53 @@ function log(m) {
 function setStatus(text, color) {
   status.textContent = text;
   status.style.color = color || "#eee";
+}
+
+function signalInfo(rssi) {
+  if (rssi >= -55) return { bars: 5, label: "Sehr stark",  cls: "" };
+  if (rssi >= -65) return { bars: 4, label: "Stark",       cls: "" };
+  if (rssi >= -75) return { bars: 3, label: "Mittel",      cls: "warn" };
+  if (rssi >= -85) return { bars: 2, label: "Schwach",     cls: "warn" };
+  if (rssi >= -95) return { bars: 1, label: "Sehr schwach", cls: "bad" };
+  return { bars: 0, label: "Kaum Signal", cls: "bad" };
+}
+
+function setLinkSignal(rssi) {
+  const info = signalInfo(rssi);
+  linkBars.forEach((bar, i) => {
+    const active = i < info.bars;
+    bar.className = active ? "on" + (info.cls ? " " + info.cls : "") : "";
+  });
+  linkRssi.textContent = rssi + " dBm";
+  linkText.textContent = info.label + " — Empfänger erreichbar";
+  linkText.style.color = info.cls === "bad" ? "#dc3545" : info.cls === "warn" ? "#ffc107" : "#28a745";
+}
+
+function setLinkOffline() {
+  linkBars.forEach(bar => { bar.className = ""; });
+  linkRssi.textContent = "— dBm";
+  linkText.textContent = "Empfänger nicht erreichbar";
+  linkText.style.color = "#dc3545";
+}
+
+function setLinkWaiting() {
+  linkBars.forEach(bar => { bar.className = ""; });
+  linkRssi.textContent = "— dBm";
+  linkText.textContent = "Warte auf Messung…";
+  linkText.style.color = "#adb5bd";
+}
+
+function handleSerialLine(line) {
+  const linkMatch = line.match(/^LINK:(OK|OUT)(?:;(-?\d+))?$/);
+  if (linkMatch) {
+    if (linkMatch[1] === "OK" && linkMatch[2] != null) {
+      setLinkSignal(Number(linkMatch[2]));
+    } else {
+      setLinkOffline();
+    }
+    return true;
+  }
+  return false;
 }
 
 function setActiveButton(activeEl) {
@@ -391,6 +500,8 @@ function stopBackgroundTasks() {
   wasWeekendBlock = false;
   nightModeActive = false;
   weekendBlockActive = false;
+  linkStatus.style.display = "none";
+  setLinkWaiting();
 }
 
 async function applyInitialDayState() {
@@ -411,6 +522,8 @@ async function connect(p) {
     btnConn.style.display = "none";
     btnArea.style.display = "block";
     schedule.style.display = "block";
+    linkStatus.style.display = "block";
+    setLinkWaiting();
     log("✓ Verbunden!");
     updateScheduleUI();
     readLoop();
@@ -495,7 +608,7 @@ async function readLoop() {
       while ((nl = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, nl).replace(/\r$/, "").trim();
         buffer = buffer.slice(nl + 1);
-        if (line) log("← " + line);
+        if (line && !handleSerialLine(line)) log("← " + line);
       }
     }
   } catch (e) {
@@ -520,3 +633,4 @@ BUTTONS.forEach(b => {
 
 </body>
 </html>
+
