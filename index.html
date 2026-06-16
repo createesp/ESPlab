@@ -259,6 +259,7 @@ let linkState = "waiting";
 let lastLinkRssi = null;
 let linkWatchdog = null;
 let lastLampCmd = null;
+let lastLinkOkMs = 0;
 const buttonEls = [];
 
 const status     = document.getElementById('status');
@@ -336,10 +337,32 @@ function startLinkWatchdog() {
   }, 25000);
 }
 
+function getDesiredLampCmd() {
+  if (lastLampCmd) return lastLampCmd;
+  const active = document.querySelector('#buttons button.active');
+  if (!active) return null;
+  return buttonEls.find(b => b.el === active)?.cmd || null;
+}
+
+async function syncLampWithReceiver(verbose) {
+  const cmd = getDesiredLampCmd();
+  if (!cmd || !writer) return;
+  if (isControlBlocked() && cmd !== "XX") return;
+  if (verbose) log("🔄 Lampe synchronisiert: " + cmd);
+  await sendRaw(cmd, false);
+  lastLampCmd = cmd;
+  if (cmd === "A1") setActiveButton(greenButtonEl());
+  else if (cmd === "A0") setActiveButton(redButtonEl());
+  else if (cmd === "XX") setActiveButton(offButtonEl());
+}
+
 function setLinkSignal(rssi) {
   const wasOut = linkState === "out";
+  const gapMs = lastLinkOkMs > 0 ? Date.now() - lastLinkOkMs : 99999;
+  const hadGap = gapMs > 11000;
   linkState = "ok";
   lastLinkRssi = rssi;
+  lastLinkOkMs = Date.now();
   linkStatus.className = "online";
   const info = signalInfo(rssi);
   linkBars.forEach((bar, i) => {
@@ -350,22 +373,9 @@ function setLinkSignal(rssi) {
   linkText.textContent = info.label + " — Empfänger erreichbar";
   linkText.style.color = info.cls === "bad" ? "#dc3545" : info.cls === "warn" ? "#ffc107" : "#28a745";
   updateMainStatus();
-  restoreLampIfNeeded(wasOut);
-}
-
-async function restoreLampIfNeeded(wasOut) {
-  if (!wasOut || !lastLampCmd || !writer) return;
-  if (isControlBlocked() && lastLampCmd !== "XX") return;
-  log("🔄 Empfänger wieder da — Lampe: " + lastLampCmd);
-  if (lastLampCmd === "XX") {
-    await sendRaw("XX", false);
-    setActiveButton(offButtonEl());
-  } else if (lastLampCmd === "A1") {
-    await sendRaw("A1", false);
-    setActiveButton(greenButtonEl());
-  } else if (lastLampCmd === "A0") {
-    await sendRaw("A0", false);
-    setActiveButton(redButtonEl());
+  const cmd = getDesiredLampCmd();
+  if (cmd === "A1" || cmd === "A0" || wasOut || hadGap) {
+    syncLampWithReceiver(wasOut || hadGap);
   }
 }
 
@@ -693,22 +703,3 @@ async function readLoop() {
   } catch (e) {
     log("Lesefehler: " + e.message);
     setStatus("⚠️ Verbindung unterbrochen", "#ffc107");
-    stopBackgroundTasks();
-  } finally {
-    try { reader.releaseLock(); } catch (e) {}
-    reading = false;
-  }
-}
-
-BUTTONS.forEach(b => {
-  const el = document.createElement('button');
-  el.textContent = b.label;
-  el.className = b.cls;
-  el.onclick = () => send(b.cmd, el);
-  btnArea.appendChild(el);
-  buttonEls.push({ el, cmd: b.cmd, blockAtNight: b.blockAtNight });
-});
-</script>
-
-</body>
-</html>
