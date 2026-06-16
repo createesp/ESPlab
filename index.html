@@ -180,7 +180,7 @@
 </head>
 <body>
 
-<h1>🚦 Verkehrssteuerung <span id="version">GUI v2</span></h1>
+<h1>🚦 Verkehrssteuerung <span id="version">GUI v2.1</span></h1>
 <div id="status">⏳ Wird geladen...</div>
 
 <div id="linkStatus">
@@ -703,3 +703,22 @@ async function readLoop() {
   } catch (e) {
     log("Lesefehler: " + e.message);
     setStatus("⚠️ Verbindung unterbrochen", "#ffc107");
+    stopBackgroundTasks();
+  } finally {
+    try { reader.releaseLock(); } catch (e) {}
+    reading = false;
+  }
+}
+
+BUTTONS.forEach(b => {
+  const el = document.createElement('button');
+  el.textContent = b.label;
+  el.className = b.cls;
+  el.onclick = () => send(b.cmd, el);
+  btnArea.appendChild(el);
+  buttonEls.push({ el, cmd: b.cmd, blockAtNight: b.blockAtNight });
+});
+</script>
+
+</body>
+</html>
