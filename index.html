@@ -258,6 +258,7 @@ let wasWeekendBlock = false;
 let linkState = "waiting";
 let lastLinkRssi = null;
 let linkWatchdog = null;
+let lastLampCmd = null;
 const buttonEls = [];
 
 const status     = document.getElementById('status');
@@ -336,6 +337,7 @@ function startLinkWatchdog() {
 }
 
 function setLinkSignal(rssi) {
+  const wasOut = linkState === "out";
   linkState = "ok";
   lastLinkRssi = rssi;
   linkStatus.className = "online";
@@ -348,6 +350,23 @@ function setLinkSignal(rssi) {
   linkText.textContent = info.label + " — Empfänger erreichbar";
   linkText.style.color = info.cls === "bad" ? "#dc3545" : info.cls === "warn" ? "#ffc107" : "#28a745";
   updateMainStatus();
+  restoreLampIfNeeded(wasOut);
+}
+
+async function restoreLampIfNeeded(wasOut) {
+  if (!wasOut || !lastLampCmd || !writer) return;
+  if (isControlBlocked() && lastLampCmd !== "XX") return;
+  log("🔄 Empfänger wieder da — Lampe: " + lastLampCmd);
+  if (lastLampCmd === "XX") {
+    await sendRaw("XX", false);
+    setActiveButton(offButtonEl());
+  } else if (lastLampCmd === "A1") {
+    await sendRaw("A1", false);
+    setActiveButton(greenButtonEl());
+  } else if (lastLampCmd === "A0") {
+    await sendRaw("A0", false);
+    setActiveButton(redButtonEl());
+  }
 }
 
 function setLinkOffline() {
@@ -481,7 +500,10 @@ async function send(cmd, buttonEl) {
     return;
   }
   const ok = await sendRaw(cmd);
-  if (ok && buttonEl) setActiveButton(buttonEl);
+  if (ok) {
+    if (cmd === "A1" || cmd === "A0" || cmd === "XX") lastLampCmd = cmd;
+    if (buttonEl) setActiveButton(buttonEl);
+  }
 }
 
 async function applyMorningState() {
@@ -489,7 +511,10 @@ async function applyMorningState() {
   const label = cmd === "A1" ? "Grün (Anliefern)" : "Rot (Stopp)";
   log("☀️ Morgen — automatisch " + label);
   const ok = await sendRaw(cmd);
-  if (ok) setActiveButton(cmd === "A1" ? greenButtonEl() : redButtonEl());
+  if (ok) {
+    lastLampCmd = cmd;
+    setActiveButton(cmd === "A1" ? greenButtonEl() : redButtonEl());
+  }
   return ok;
 }
 
@@ -509,6 +534,7 @@ async function runScheduleCheck() {
     if (!wasNightMode) {
       log("🌙 Nachtmodus beginnt — Lampen aus");
       await sendRaw("XX");
+      lastLampCmd = "XX";
       setActiveButton(offButtonEl());
     } else {
       await sendRaw("XX", false);
@@ -517,6 +543,7 @@ async function runScheduleCheck() {
     if (!wasWeekendBlock) {
       log("📅 Wochenende — Lampen aus");
       await sendRaw("XX");
+      lastLampCmd = "XX";
       setActiveButton(offButtonEl());
     } else {
       await sendRaw("XX", false);
@@ -558,6 +585,7 @@ async function applyInitialDayState() {
   const now = new Date();
   if (isNightTime(now) || isWeekendBlock(now)) {
     await sendRaw("XX");
+    lastLampCmd = "XX";
     setActiveButton(offButtonEl());
   } else {
     await applyMorningState();
